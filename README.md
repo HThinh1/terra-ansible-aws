@@ -10,6 +10,9 @@ apt update
 # Install AWSCLI
 - apt install python-pip
 - pip install awscli --upgrade
+## Config AWS credentials with profile to run 
+- aws configure --profile <name>
+
 
 # Install Ansible
 - apt install software-properties-common
@@ -30,3 +33,9 @@ apt update
 
 #  To beautify code
 - terraform fmt <--diff: show which file is corrected>
+
+# To do test run
+- terraform plan
+
+# To deploy
+- terraform apply
