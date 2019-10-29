@@ -1,6 +1,7 @@
 provider "aws" {
   region  = "${var.aws_region}"
-  profile = "${var.aws_profile}"
+  access_key = "${var.aws_access_key}"
+  secret_key = "${var.aws_secret_key}"
 }
 
 #---------IAM---------
@@ -389,7 +390,8 @@ s3code=${aws_s3_bucket.code.bucket}
 EOF
 EOD
   }
-# the above may miss this line : "domain=${var.domain_name}"
+
+  # the above may miss this line : "domain=${var.domain_name}"
   provisioner "local-exec" {
     command = "aws ec2 wait instance-status-ok --instance-ids ${aws_instance.terra_dev.id} --profile thinh && ansible-playbook -i aws_hosts wordpress.yml"
   }
@@ -403,28 +405,31 @@ EOD
 
 resource "aws_elb" "terra_elb" {
   name = "terra-elb"
+
   subnets = ["${aws_subnet.terra_public1_subnet.id}",
-    "${aws_subnet.terra_public2_subnet.id}"
+    "${aws_subnet.terra_public2_subnet.id}",
   ]
+
   security_groups = ["${aws_security_group.terra_public_sg.id}"]
 
   listener {
-    instance_port = 80
+    instance_port     = 80
     instance_protocol = "http"
-    lb_port = 80
-    lb_protocol = "http"
+    lb_port           = 80
+    lb_protocol       = "http"
   }
 
   health_check {
-    healthy_threshold = "${var.elb_healthy_threshold}"
+    healthy_threshold   = "${var.elb_healthy_threshold}"
     unhealthy_threshold = "${var.elb_unhealthy_threshold}"
-    timeout = "${var.elb_timeout}"
-    target = "TCP:80"
-    interval = "${var.elb_interval}"
+    timeout             = "${var.elb_timeout}"
+    target              = "TCP:80"
+    interval            = "${var.elb_interval}"
   }
-  cross_zone_load_balancing = true
-  idle_timeout = 400
-  connection_draining = true
+
+  cross_zone_load_balancing   = true
+  idle_timeout                = 400
+  connection_draining         = true
   connection_draining_timeout = 400
 
   tags {
@@ -443,7 +448,7 @@ resource "random_id" "golden_ami" {
 # AMI
 
 resource "aws_ami_from_instance" "terra_golden" {
-  name = "wp_ami-${random_id.golden_ami.b64}"
+  name               = "wp_ami-${random_id.golden_ami.b64}"
   source_instance_id = "${aws_instance.terra_dev.id}"
 
   provisioner "local-exec" {
@@ -460,13 +465,13 @@ EOT
 
 #----- Launch config -----
 resource "aws_launch_configuration" "terra_lc" {
-  name_prefix = "terra_lc"
-  image_id = "${aws_ami_from_instance.terra_golden.id}"
-  instance_type = "${var.lc_instance_type}"
-  security_groups = ["${aws_security_group.terra_private_sg.id}"]
+  name_prefix          = "terra_lc"
+  image_id             = "${aws_ami_from_instance.terra_golden.id}"
+  instance_type        = "${var.lc_instance_type}"
+  security_groups      = ["${aws_security_group.terra_private_sg.id}"]
   iam_instance_profile = "${aws_iam_instance_profile.s3_access_profile.id}"
-  key_name = "${aws_key_pair.terra_auth.id}"
-  user_data = "${file("userdata")}"
+  key_name             = "${aws_key_pair.terra_auth.id}"
+  user_data            = "${file("userdata")}"
 
   lifecycle {
     create_before_destroy = true
@@ -475,27 +480,80 @@ resource "aws_launch_configuration" "terra_lc" {
 
 #----- ASG -----
 resource "aws_autoscaling_group" "terra_asg" {
-  name = "asg-${aws_launch_configuration.terra_lc.id}"
-  max_size = "${var.asg_max}"
-  min_size = "${var.asg_min}"
+  name                      = "asg-${aws_launch_configuration.terra_lc.id}"
+  max_size                  = "${var.asg_max}"
+  min_size                  = "${var.asg_min}"
   health_check_grace_period = "${var.asg_grace}"
-  health_check_type = "${var.asg_hct}"
-  desired_capacity = "${var.asg_cap}"
-  force_delete = true
-  load_balancers = ["${aws_elb.terra_elb.id}"]
+  health_check_type         = "${var.asg_hct}"
+  desired_capacity          = "${var.asg_cap}"
+  force_delete              = true
+  load_balancers            = ["${aws_elb.terra_elb.id}"]
 
   vpc_zone_identifier = ["${aws_subnet.terra_private1_subnet.id}",
-  "${aws_subnet.terra_private2_subnet.id}"
+    "${aws_subnet.terra_private2_subnet.id}",
   ]
+
   launch_configuration = "${aws_launch_configuration.terra_lc.name}"
 
   tag {
-    key = "Name"
-    value = "wp_asg-instance"
+    key                 = "Name"
+    value               = "wp_asg-instance"
     propagate_at_launch = true
   }
 
   lifecycle {
     create_before_destroy = true
+  }
+}
+
+resource "aws_autoscaling_policy" "scaleup" {
+  name                   = "scaleup"
+  scaling_adjustment     = 1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 300
+  autoscaling_group_name = "${aws_autoscaling_group.terra_asg.name}"
+}
+
+resource "aws_cloudwatch_metric_alarm" "scaleup" {
+  alarm_name          = "scaleup"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = "120"
+  statistic           = "Average"
+  threshold           = "70"
+
+  alarm_description = "Scale up when EC2 instances pass threshold"
+  alarm_actions     = ["${aws_autoscaling_policy.scaleup.arn}"]
+
+  dimensions = {
+    AutoScalingGroupName = "${aws_autoscaling_group.terra_asg.name}"
+  }
+}
+
+resource "aws_autoscaling_policy" "scaledown" {
+  name                   = "scaledown"
+  scaling_adjustment     = -1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 300
+  autoscaling_group_name = "${aws_autoscaling_group.terra_asg.name}"
+}
+
+resource "aws_cloudwatch_metric_alarm" "scaledown" {
+  alarm_name          = "scaledown"
+  comparison_operator = "LessThanOrEqualToThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = "120"
+  statistic           = "Average"
+  threshold           = "30"
+
+  alarm_description = "Scale down when EC2 instances pass threshold"
+  alarm_actions     = ["${aws_autoscaling_policy.scaledown.arn}"]
+
+  dimensions = {
+    AutoScalingGroupName = "${aws_autoscaling_group.terra_asg.name}"
   }
 }
